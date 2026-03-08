@@ -1283,6 +1283,8 @@ async function openPicker() {
   if (!gAccessToken) { showToast('Please connect Google Photos first'); return; }
   document.getElementById('syncStatus').textContent = 'Opening Google Photos picker…';
   document.getElementById('pickerBtn').disabled = true;
+  pickerSessionId = null;
+  clearInterval(pickerPollInterval);
 
   try {
     // 1. Create picker session
@@ -1365,7 +1367,7 @@ async function fetchPickerItems() {
       const item = items[i];
       console.log(`Item ${i} keys:`, Object.keys(item));
 
-      const alreadyLogged = logEntries.some(e => e.googlePhotoId === item.mediaFile?.mediaFileId || e.googlePhotoId === item.id);
+      const alreadyLogged = logEntries.some(e => e.googlePhotoId && e.googlePhotoId === item.id);
       if (alreadyLogged) { console.log(`Item ${i} already logged, skipping`); continue; }
 
       try {
