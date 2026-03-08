@@ -1346,33 +1346,49 @@ async function fetchPickerItems() {
       headers: { Authorization: 'Bearer ' + gAccessToken }
     });
     const data = await resp.json();
-    console.log('Picker items:', JSON.stringify(data).slice(0, 500));
+    console.log('Picker items full response:', JSON.stringify(data).slice(0, 1000));
 
     const items = data.mediaItems || [];
+    console.log(`Total items returned: ${items.length}`);
     if (items.length === 0) {
       document.getElementById('syncStatus').textContent = 'No photos returned — try selecting again';
       return;
     }
+
+    // Log first item structure so we can see field names
+    console.log('First item structure:', JSON.stringify(items[0]));
 
     document.getElementById('syncStatus').textContent = `Processing ${items.length} photo(s) through AI…`;
     let added = 0;
 
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
+      console.log(`Item ${i} keys:`, Object.keys(item));
+
       const alreadyLogged = logEntries.some(e => e.googlePhotoId === item.mediaFile?.mediaFileId || e.googlePhotoId === item.id);
-      if (alreadyLogged) continue;
+      if (alreadyLogged) { console.log(`Item ${i} already logged, skipping`); continue; }
 
       try {
-        const imgUrl = (item.baseUrl || item.mediaFile?.baseUrl) + '=w800-h800';
+        // Picker API structure: baseUrl is at item.mediaFile.baseUrl
+        const baseUrl = item.mediaFile?.baseUrl;
+        console.log(`Item ${i} baseUrl:`, baseUrl ? 'found' : 'MISSING');
+        if (!baseUrl) { console.warn(`Item ${i} has no baseUrl, skipping`); continue; }
+
+        const imgUrl = baseUrl + '=w800-h800';
+        console.log(`Fetching image ${i}...`);
         const imgResp = await fetch(imgUrl);
+        console.log(`Image ${i} fetch status:`, imgResp.status);
         const blob = await imgResp.blob();
         const base64 = await blobToBase64(blob);
         const b64data = base64.split(',')[1];
+
+        console.log(`Sending image ${i} to Claude for analysis...`);
         const result = await analyzeWithClaude(b64data, blob.type);
+        console.log(`Claude result for item ${i}:`, JSON.stringify(result));
 
         if (result.is_vial) {
-          const creationTime = item.mediaMetadata?.creationTime || item.mediaFile?.mediaFileMetadata?.creationTime;
-          const photoDate = creationTime ? new Date(creationTime) : new Date();
+          // Creation time is at item.createTime in Picker API
+          const photoDate = item.createTime ? new Date(item.createTime) : new Date();
           logEntries.push({
             date: photoDate,
             units: result.units_iu || 'unknown',
@@ -1380,14 +1396,16 @@ async function fetchPickerItems() {
             reason: result.body_part ? 'bleed' : 'prophylaxis',
             bodyPart: result.body_part || null,
             img: base64,
-            googlePhotoId: item.id || item.mediaFile?.mediaFileId,
+            googlePhotoId: item.id,
             bodyPartConfirmed: false
           });
           added++;
+        } else {
+          console.log(`Item ${i} not identified as vial — is_vial: ${result.is_vial}`);
         }
         document.getElementById('syncStatus').textContent = `Analyzed ${i+1}/${items.length} — ${added} vial(s) found…`;
       } catch(imgErr) {
-        console.warn('Could not analyze photo:', imgErr);
+        console.error(`Error processing item ${i}:`, imgErr.message);
       }
     }
 
@@ -1398,6 +1416,7 @@ async function fetchPickerItems() {
     showToast(`✓ ${added} new entr${added===1?'y':'ies'} added from Google Photos`);
 
   } catch(e) {
+    console.error('fetchPickerItems error:', e);
     showToast('Failed to fetch photos: ' + e.message);
     document.getElementById('syncStatus').textContent = 'Fetch failed: ' + e.message;
   }
