@@ -486,12 +486,8 @@
   <div class="status-dot" id="gStatusDot"></div>
   <span id="gStatusText" style="color:var(--muted)">Google Photos not connected</span>
   <button class="btn btn-secondary" id="gConnectBtn" onclick="connectGooglePhotos()" style="padding:5px 12px;font-size:11px">Connect Google Photos</button>
-  <div id="gAlbumArea" style="display:none;display:flex;gap:10px;align-items:center">
-    <span style="color:var(--muted)">Album:</span>
-    <select class="album-select" id="albumSelect" onchange="selectAlbum(this.value)">
-      <option value="">— select album —</option>
-    </select>
-    <button class="btn btn-secondary" onclick="syncAlbum()" id="syncBtn" style="padding:5px 12px;font-size:11px" disabled>↻ Sync</button>
+  <div id="gAlbumArea" style="display:none;gap:10px;align-items:center">
+    <button class="btn btn-primary" onclick="openPicker()" id="pickerBtn" style="padding:5px 14px;font-size:11px">📂 Select Photos from Google Photos</button>
   </div>
   <span class="sync-status" id="syncStatus"></span>
   <button class="btn btn-danger" id="gDisconnectBtn" onclick="disconnectGoogle()" style="display:none;padding:5px 10px;font-size:11px;margin-left:auto">Disconnect</button>
@@ -1212,36 +1208,34 @@ function showToast(msg) {
 }
 
 // ──────────────────────────────────────────────
-// GOOGLE PHOTOS AUTH
+// GOOGLE PHOTOS AUTH + PICKER API
 // ──────────────────────────────────────────────
 const GOOG_CLIENT_ID = '922401108958-adh97ishgm68bpr15e1bigo9hcv4g1kk.apps.googleusercontent.com';
-const GOOG_SCOPE = 'https://www.googleapis.com/auth/photoslibrary.readonly';
+const PICKER_SCOPE = 'https://www.googleapis.com/auth/photospicker.mediaitems.readonly https://www.googleapis.com/auth/userinfo.email';
+const PICKER_API_BASE = 'https://photospicker.googleapis.com/v1';
 
 let gAccessToken = null;
 let gUserEmail = null;
-let selectedAlbumId = null;
 let tokenClient = null;
+let pickerSessionId = null;
+let pickerPollInterval = null;
 
 function initGoogleAuth() {
-  if (!window.google) { setTimeout(initGoogleAuth, 500); return; }
+  if (!window.google) { setTimeout(initGoogleAuth, 300); return; }
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: GOOG_CLIENT_ID,
-    scope: GOOG_SCOPE,
+    scope: PICKER_SCOPE,
     callback: handleTokenResponse,
   });
 }
 
 function connectGooglePhotos() {
   if (!tokenClient) {
-    // Try to initialize and retry
     if (window.google?.accounts?.oauth2) {
       initGoogleAuth();
-      setTimeout(() => {
-        if (tokenClient) tokenClient.requestAccessToken({ prompt: 'consent' });
-        else showToast('Still loading — please try again in a moment');
-      }, 500);
+      setTimeout(() => tokenClient ? tokenClient.requestAccessToken({ prompt: 'consent' }) : showToast('Try again in a moment'), 500);
     } else {
-      showToast('Google script still loading — please try again in a moment');
+      showToast('Google script still loading — try again');
     }
     return;
   }
@@ -1251,8 +1245,6 @@ function connectGooglePhotos() {
 async function handleTokenResponse(resp) {
   if (resp.error) { showToast('Auth failed: ' + resp.error); return; }
   gAccessToken = resp.access_token;
-
-  // Get user info
   try {
     const ui = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
       headers: { Authorization: 'Bearer ' + gAccessToken }
@@ -1260,9 +1252,7 @@ async function handleTokenResponse(resp) {
     const ud = await ui.json();
     gUserEmail = ud.email;
   } catch(e) {}
-
   setConnectedUI();
-  await loadAlbums();
 }
 
 function setConnectedUI() {
@@ -1272,12 +1262,14 @@ function setConnectedUI() {
   document.getElementById('gConnectBtn').style.display = 'none';
   document.getElementById('gAlbumArea').style.display = 'flex';
   document.getElementById('gDisconnectBtn').style.display = 'block';
+  document.getElementById('syncStatus').textContent = 'Ready — click Select Photos to import from Google Photos';
 }
 
 function disconnectGoogle() {
   gAccessToken = null;
   gUserEmail = null;
-  selectedAlbumId = null;
+  pickerSessionId = null;
+  clearInterval(pickerPollInterval);
   document.getElementById('gStatusDot').classList.remove('connected');
   document.getElementById('gStatusText').textContent = 'Google Photos not connected';
   document.getElementById('gStatusText').style.color = 'var(--muted)';
@@ -1285,84 +1277,93 @@ function disconnectGoogle() {
   document.getElementById('gAlbumArea').style.display = 'none';
   document.getElementById('gDisconnectBtn').style.display = 'none';
   document.getElementById('syncStatus').textContent = '';
-  document.getElementById('albumSelect').innerHTML = '<option value="">— select album —</option>';
 }
 
-async function loadAlbums() {
-  if (!gAccessToken) return;
-  document.getElementById('syncStatus').textContent = 'Loading albums…';
-  try {
-    const resp = await fetch('https://photoslibrary.googleapis.com/v1/albums?pageSize=50', {
-      headers: { Authorization: 'Bearer ' + gAccessToken }
-    });
-    const data = await resp.json();
-    console.log('Albums API response:', JSON.stringify(data));
-
-    if (data.error) {
-      document.getElementById('syncStatus').textContent = 'Error: ' + data.error.message;
-      showToast('Albums error: ' + data.error.message);
-      return;
-    }
-
-    const albums = data.albums || [];
-    const sel = document.getElementById('albumSelect');
-    sel.innerHTML = '<option value="">— select album —</option>';
-
-    if (albums.length === 0) {
-      document.getElementById('syncStatus').textContent = 'No albums found — see console for details';
-      showToast('No albums returned — check console (F12)');
-      return;
-    }
-
-    albums.forEach(a => {
-      const opt = document.createElement('option');
-      opt.value = a.id;
-      opt.textContent = a.title + (a.mediaItemsCount ? ` (${a.mediaItemsCount})` : '');
-      sel.appendChild(opt);
-    });
-    document.getElementById('syncStatus').textContent = `${albums.length} albums loaded`;
-  } catch(e) {
-    console.error('loadAlbums error:', e);
-    document.getElementById('syncStatus').textContent = 'Failed to load albums: ' + e.message;
-    showToast('Could not load albums — check console (F12)');
-  }
-}
-
-function selectAlbum(albumId) {
-  selectedAlbumId = albumId;
-  const syncBtn = document.getElementById('syncBtn');
-  syncBtn.disabled = !albumId;
-  if (albumId) document.getElementById('syncStatus').textContent = 'Album selected — click Sync to import';
-}
-
-async function syncAlbum() {
-  if (!gAccessToken || !selectedAlbumId) return;
-  const syncBtn = document.getElementById('syncBtn');
-  syncBtn.disabled = true;
-  syncBtn.textContent = '↻ Syncing…';
-  document.getElementById('syncStatus').textContent = 'Fetching photos…';
+async function openPicker() {
+  if (!gAccessToken) { showToast('Please connect Google Photos first'); return; }
+  document.getElementById('syncStatus').textContent = 'Opening Google Photos picker…';
+  document.getElementById('pickerBtn').disabled = true;
 
   try {
-    const resp = await fetch('https://photoslibrary.googleapis.com/v1/mediaItems:search', {
+    // 1. Create picker session
+    const sessResp = await fetch(`${PICKER_API_BASE}/sessions`, {
       method: 'POST',
       headers: {
         Authorization: 'Bearer ' + gAccessToken,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ albumId: selectedAlbumId, pageSize: 50 })
+      body: JSON.stringify({})
+    });
+    const sessData = await sessResp.json();
+    console.log('Picker session:', JSON.stringify(sessData));
+
+    if (sessData.error) {
+      showToast('Picker error: ' + sessData.error.message);
+      document.getElementById('syncStatus').textContent = 'Error: ' + sessData.error.message;
+      document.getElementById('pickerBtn').disabled = false;
+      return;
+    }
+
+    pickerSessionId = sessData.id;
+    const pickerUri = sessData.pickerUri;
+
+    // 2. Open picker popup
+    window.open(pickerUri, 'gphotos-picker', 'width=900,height=700,scrollbars=yes');
+    document.getElementById('syncStatus').textContent = '📂 Select your vial photos in the popup — then come back here, the app will auto-detect when you\'re done…';
+
+    // 3. Poll for completion
+    clearInterval(pickerPollInterval);
+    pickerPollInterval = setInterval(async () => {
+      try {
+        const pollResp = await fetch(`${PICKER_API_BASE}/sessions/${pickerSessionId}`, {
+          headers: { Authorization: 'Bearer ' + gAccessToken }
+        });
+        const pollData = await pollResp.json();
+        console.log('Poll:', pollData.mediaItemsSet, pollData.state);
+
+        if (pollData.mediaItemsSet === true) {
+          clearInterval(pickerPollInterval);
+          document.getElementById('syncStatus').textContent = 'Photos confirmed! Fetching & analyzing…';
+          await fetchPickerItems();
+          document.getElementById('pickerBtn').disabled = false;
+        }
+      } catch(e) {
+        console.warn('Poll error:', e);
+      }
+    }, 2000);
+
+  } catch(e) {
+    showToast('Failed to open picker: ' + e.message);
+    document.getElementById('syncStatus').textContent = 'Failed: ' + e.message;
+    document.getElementById('pickerBtn').disabled = false;
+  }
+}
+
+async function fetchPickerItems() {
+  if (!pickerSessionId || !gAccessToken) return;
+  try {
+    const resp = await fetch(`${PICKER_API_BASE}/mediaItems?sessionId=${pickerSessionId}&pageSize=100`, {
+      headers: { Authorization: 'Bearer ' + gAccessToken }
     });
     const data = await resp.json();
-    const items = data.mediaItems || [];
-    document.getElementById('syncStatus').textContent = `Found ${items.length} photo(s) — analyzing…`;
+    console.log('Picker items:', JSON.stringify(data).slice(0, 500));
 
+    const items = data.mediaItems || [];
+    if (items.length === 0) {
+      document.getElementById('syncStatus').textContent = 'No photos returned — try selecting again';
+      return;
+    }
+
+    document.getElementById('syncStatus').textContent = `Processing ${items.length} photo(s) through AI…`;
     let added = 0;
-    for (const item of items) {
-      const alreadyLogged = logEntries.some(e => e.googlePhotoId === item.id);
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const alreadyLogged = logEntries.some(e => e.googlePhotoId === item.mediaFile?.mediaFileId || e.googlePhotoId === item.id);
       if (alreadyLogged) continue;
 
-      // Fetch the actual image for AI analysis
-      const imgUrl = item.baseUrl + '=w800-h800';
       try {
+        const imgUrl = (item.baseUrl || item.mediaFile?.baseUrl) + '=w800-h800';
         const imgResp = await fetch(imgUrl);
         const blob = await imgResp.blob();
         const base64 = await blobToBase64(blob);
@@ -1370,39 +1371,36 @@ async function syncAlbum() {
         const result = await analyzeWithClaude(b64data, blob.type);
 
         if (result.is_vial) {
-          const photoDate = item.mediaMetadata?.creationTime
-            ? new Date(item.mediaMetadata.creationTime)
-            : new Date();
-          logEntries.unshift({
+          const creationTime = item.mediaMetadata?.creationTime || item.mediaFile?.mediaFileMetadata?.creationTime;
+          const photoDate = creationTime ? new Date(creationTime) : new Date();
+          logEntries.push({
             date: photoDate,
             units: result.units_iu || 'unknown',
             lot: result.lot_number || 'unknown',
             reason: result.body_part ? 'bleed' : 'prophylaxis',
             bodyPart: result.body_part || null,
             img: base64,
-            googlePhotoId: item.id,
+            googlePhotoId: item.id || item.mediaFile?.mediaFileId,
             bodyPartConfirmed: false
           });
           added++;
-          document.getElementById('syncStatus').textContent = `Analyzed ${items.indexOf(item)+1}/${items.length} — ${added} vial(s) found…`;
         }
+        document.getElementById('syncStatus').textContent = `Analyzed ${i+1}/${items.length} — ${added} vial(s) found…`;
       } catch(imgErr) {
-        console.warn('Could not analyze photo:', item.id, imgErr);
+        console.warn('Could not analyze photo:', imgErr);
       }
     }
 
+    logEntries.sort((a, b) => new Date(a.date) - new Date(b.date));
     renderLog();
     renderCharts();
-    const now = new Date().toLocaleTimeString();
-    document.getElementById('syncStatus').textContent = `Last synced ${now} — ${added} new entr${added===1?'y':'ies'} added`;
-    showToast(`✓ Sync complete — ${added} new vial photo${added===1?'':'s'} added`);
-  } catch(e) {
-    document.getElementById('syncStatus').textContent = 'Sync failed';
-    showToast('Sync error: ' + e.message);
-  }
+    document.getElementById('syncStatus').textContent = `✓ Done — ${added} vial photo${added===1?'':'s'} added to log`;
+    showToast(`✓ ${added} new entr${added===1?'y':'ies'} added from Google Photos`);
 
-  syncBtn.disabled = false;
-  syncBtn.textContent = '↻ Sync';
+  } catch(e) {
+    showToast('Failed to fetch photos: ' + e.message);
+    document.getElementById('syncStatus').textContent = 'Fetch failed: ' + e.message;
+  }
 }
 
 function blobToBase64(blob) {
@@ -1414,7 +1412,6 @@ function blobToBase64(blob) {
   });
 }
 
-// Init on load
 // ──────────────────────────────────────────────
 // INIT
 // ──────────────────────────────────────────────
