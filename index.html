@@ -1296,18 +1296,35 @@ async function loadAlbums() {
       headers: { Authorization: 'Bearer ' + gAccessToken }
     });
     const data = await resp.json();
+    console.log('Albums API response:', JSON.stringify(data));
+
+    if (data.error) {
+      document.getElementById('syncStatus').textContent = 'Error: ' + data.error.message;
+      showToast('Albums error: ' + data.error.message);
+      return;
+    }
+
+    const albums = data.albums || [];
     const sel = document.getElementById('albumSelect');
     sel.innerHTML = '<option value="">— select album —</option>';
-    (data.albums || []).forEach(a => {
+
+    if (albums.length === 0) {
+      document.getElementById('syncStatus').textContent = 'No albums found — see console for details';
+      showToast('No albums returned — check console (F12)');
+      return;
+    }
+
+    albums.forEach(a => {
       const opt = document.createElement('option');
       opt.value = a.id;
       opt.textContent = a.title + (a.mediaItemsCount ? ` (${a.mediaItemsCount})` : '');
       sel.appendChild(opt);
     });
-    document.getElementById('syncStatus').textContent = `${(data.albums||[]).length} albums loaded`;
+    document.getElementById('syncStatus').textContent = `${albums.length} albums loaded`;
   } catch(e) {
-    document.getElementById('syncStatus').textContent = 'Failed to load albums';
-    showToast('Could not load albums — check OAuth scope');
+    console.error('loadAlbums error:', e);
+    document.getElementById('syncStatus').textContent = 'Failed to load albums: ' + e.message;
+    showToast('Could not load albums — check console (F12)');
   }
 }
 
